@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: telegram-session-backend
+    env: node
+    buildCommand: npm install && pip install telethon
+    startCommand: node server.js
