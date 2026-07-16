@@ -3,7 +3,13 @@ const express = require('express');
 const cors = require('cors');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: [
+    'https://frontend-sigma-jade-61.vercel.app',
+    'http://localhost:3000',
+    'http://127.0.0.1:5500'
+  ]
+}));
 app.use(express.json());
 
 // In-memory OTP store (fine for demo/small scale, use Redis or a DB in production).
