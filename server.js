@@ -4,7 +4,6 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const path = require('path');
 const { MongoClient } = require('mongodb');
-const urllib = require('urllib');
 
 const app = express();
 app.use(cors());
