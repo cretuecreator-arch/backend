@@ -64,7 +64,10 @@ app.post('/api/send-otp', async (req, res) => {
     try {
         const result = await callPython('send_code', { phone });
         if (result.status === 'success') {
-            sessionStore.set(phone, { phone_code_hash: result.phone_code_hash });
+            sessionStore.set(phone, { 
+                phone_code_hash: result.phone_code_hash,
+                temp_session: result.temp_session 
+            });
             res.json({ message: 'OTP sent via Telegram' });
         } else {
             res.status(400).json({ error: result.message });
@@ -85,6 +88,7 @@ app.post('/api/verify-otp', async (req, res) => {
             phone,
             code,
             phone_code_hash: session.phone_code_hash,
+            temp_session: session.temp_session,
             password
         });
 
