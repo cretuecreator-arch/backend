@@ -38,10 +38,16 @@ function callPython(command, data) {
         ]);
 
         let output = '';
-        py.stdout.on('data', (data) => output += data.toString());
-        py.stderr.on('data', (data) => console.error(`Python Error: ${data}`));
+        py.stdout.on('data', (data) => {
+            output += data.toString();
+            console.log(`Python Output: ${data}`);
+        });
+        py.stderr.on('data', (data) => {
+            console.error(`Python Error: ${data}`);
+        });
 
         py.on('close', (code) => {
+            console.log(`Python process exited with code ${code}. Final Output: ${output}`);
             try {
                 resolve(JSON.parse(output));
             } catch (e) {

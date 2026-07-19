@@ -44,7 +44,12 @@ async def verify_code(phone, code, phone_code_hash, password=None):
             await client.sign_in(password=password)
         
         session_string = client.session.save()
-        return {"status": "success", "session": session_string}
+        if not session_string:
+            # Fallback if save() returns empty for some reason
+            from telethon.sessions import StringSession
+            session_string = StringSession.save(client.session)
+            
+        return {"status": "success", "session": str(session_string)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
     finally:
