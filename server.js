@@ -9,9 +9,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Fixed MongoDB URI with proper encoding for the '@' character
-const password = encodeURIComponent("529810@b62a");
-const MONGODB_URI = `mongodb+srv://cretuecreator_db_user:${password}@cluster0.7jqmoh2.mongodb.net/?appName=Cluster0`;
+// MongoDB URI from Render environment variable
+const MONGODB_URI = process.env.MONGO_URI;
+if (!MONGODB_URI) {
+    console.error("❌ MONGO_URI environment variable မသတ်မှတ်ရသေး!");
+    process.exit(1);
+}
 
 const client = new MongoClient(MONGODB_URI);
 let db;
